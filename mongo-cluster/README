@@ -1,0 +1,9 @@
+First, (review and edit) then run setup.sh, you may want to change SETUP_BASE, the database setup will comsume about ~200G of disk space.
+
+After setup.sh have done, run the command it instruct you to run.
+
+Clone pytpcc/pytpcc (https://github.com/ryncsn/py-tpcc):
+For data preparing: (only need to run once, will consume ~200G of space, you may use mongodb.config.* depends on which replica is master)
+./tpcc.py --config=mongodb.config mongodb --no-execute --duration=900 --warehouses=500 --clients=30
+For benchmark: (run multiple time for benchmark)
+./tpcc.py --config=mongodb.config mongodb --no-load --duration=900 --warehouses=500 --clients=30
