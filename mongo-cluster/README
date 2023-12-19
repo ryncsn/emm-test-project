@@ -1,9 +1,49 @@
 First, (review and edit) then run setup.sh, you may want to change SETUP_BASE, the database setup will comsume about ~200G of disk space.
 
-After setup.sh have done, run the command it instruct you to run.
+For reference, I used Fedora Cloud Image as the base VM image.
 
-Clone pytpcc/pytpcc (https://github.com/ryncsn/py-tpcc):
+Setting up VM (optional)
+========================
+Download the image:
+wget https://download.fedoraproject.org/pub/fedora/linux/releases/39/Cloud/x86_64/images/Fedora-Cloud-Base-39-1.5.x86_64.qcow2
+
+Set root password (For `virt-sysprep` tool, do `dnf install guestfs-tools -y`):
+virt-sysprep -a /data/volumes/Fedora-Cloud-Base-39-1.5.x86_64.backup.qcow2 --root-password password:fedora
+
+You may need to expand the qcow2 image or attach a external image/disk. In my case I attached a standalone disk and ran following command after VM is launched (vdb is my externel disk):
+mkdir /var/mongo-test
+mount /dev/vdb /var/mongo-test/
+
+
+Run the benchmark (run this in test environment, eg. the VM above)
+=================
+Clone this repo:
+git clone https://github.com/ryncsn/emm-test-project.git
+
+Run the setup script:
+cd emm-test-project/mongo-cluster
+./setup.sh
+
+It will show some prompts, and ask which Mongo Image to use, I used this one:
+docker.io/library/mongo:6
+
+After setup.sh is done, run the command it instruct you to run (setup the DB user/password).
+
+Then, clone pytpcc/pytpcc:
+git clone https://github.com/ryncsn/py-tpcc
+
+Unfortunately this still requires Python 2.7, but fortunately until Fedora 39 python 2.7 is still available.
+dnf install python2.7 -y
+
+No luck for pip, install it manually:
+curl https://bootstrap.pypa.io/pip/2.7/get-pip.py -o get-pip.py
+python2 get-pip.py
+
+And install pymongo:
+pip2 install pymongo
+
 For data preparing: (only need to run once, will consume ~200G of space, you may use mongodb.config.* depends on which replica is master)
 ./tpcc.py --config=mongodb.config mongodb --no-execute --duration=900 --warehouses=500 --clients=30
+
 For benchmark: (run multiple time for benchmark)
 ./tpcc.py --config=mongodb.config mongodb --no-load --duration=900 --warehouses=500 --clients=30

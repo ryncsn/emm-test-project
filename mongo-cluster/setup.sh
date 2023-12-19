@@ -76,17 +76,21 @@ done
 docker network remove mongo-cluster || :
 
 # XXX: If MongoDB Failed to setup, you may remove the --rm below to retrive failure log
+port=7000
 docker network create mongo-cluster
 for replica in $REPLICAS; do
+	port=$(( port + 1 ))
 	docker run -d --network mongo-cluster --name "mongo-$replica" \
 		-e MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME \
 		-e MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD \
 		-e MONGO_INITDB_DATABASE=$MONGO_INITDB_DATABASE \
 		-v "$SETUP_BASE/mongo-$replica:/data/db" \
+		-p $port:27017 \
 		mongo:6 -f /data/db/config.conf
 done
 
-echo "Sleep 10s and executing cluster setup, if this failed, you can try manually later."
+echo "=== Sleep 10s and executing cluster setup... if this failed, you can try manually later."
+set -x
 sleep 10
 # XXX: Need to change the setup command if REPLICAS changes.
 docker exec -it mongo-r1 mongosh --eval \
@@ -98,9 +102,10 @@ docker exec -it mongo-r1 mongosh --eval \
       {_id: 2, host: "mongo-r3"}
     ]
 })"' || echo "Cluster setup failed, check the error log."
+set +x
 
-echo "After the cluster setup, please add test user manually with:"
-echo docker exec -it mongo-r1 mongosh admin
-echo Then in mongosh, enter following command:
-echo '    db.createUser({user:"root",pwd:"passwd",roles:["root"]})'
-echo ""
+echo "=== Setting up user/password... if this failed, you can try manually later."
+set -x
+sleep 10
+docker exec -it mongo-r1 mongosh admin --eval 'db.createUser({user:"root",pwd:"passwd",roles:["root"]})'
+set +x
