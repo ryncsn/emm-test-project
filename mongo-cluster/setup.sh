@@ -56,6 +56,9 @@ echo "Running this script will destroy all previous data under $SETUP_BASE, and 
 read -r RES
 [[ "$RES" == y ]] || exit 0
 
+echo "Disabling SELinux... If this failed you may try do it manually."
+setenforce 0 || :
+
 KEY=$(openssl rand -base64 756)
 for replica in $REPLICAS; do
 	rm -rf "$SETUP_BASE/mongo-$replica"
