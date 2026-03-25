@@ -8,30 +8,27 @@
  *    child process = a separate mm_struct in the lruvec's mm_list.
  *    This makes aging expensive and repeatedly triggered.
  *
- * 2. A separate thread allocates ~44 GB of anonymous memory (no swap),
- *    forcing reclaim. Since anon pages are unevictable without swap,
- *    the reclaimer MUST evict the file cache to make progress.
+ * 2. A separate thread allocates ~44 GB of anonymous memory,
+ *    forcing reclaim.
  *
  * USAGE
  * =====
- *   # First, create a 8 GB test file (once, assuming /mnt/ramdisk
- *   is a fast ramdisk: mkfs.ext4 /dev/pmem0; mount /dev/pmem0 /mnt/ramdisk):
- *   dd if=/dev/zero of=/mnt/ramdisk/zero.img bs=1M count=8196
- *
  *   # Compile:
  *   gcc -O2 -Wall -pthread -o file_anon_mix_pressure file_anon_mix_pressure.c
  *
  *   # Run (in a 48G memcg):
  *   echo 3 > /proc/sys/vm/drop_caches
  *   sync
- *   swapoff -a
  *   sleep 10
- *   ./file_anon_mix_pressure /mnt/ramdisk/zero.img 44g 32
+ *   ./file_anon_mix_pressure /mnt/ramdisk/zero.img 44g 8g
  *
- *   # The file size is auto-detected from the file.
- *   # The anon pressure size (in GB) is required (second argument).
- *   # The number of file reader processes is optional (third argument, default: 64).
- *   # Swap must be disabled
+ *   # The test file at the given path is auto-created if it doesn't exist
+ *   # or extended if smaller than file_size.
+ *   # The anon pressure size and file cache size accept suffixes: g/G, m/M, k/K.
+ *   # Optional arguments:
+ *   #   anon_workers   - number of pressure threads (default: 96)
+ *   #   file_workers   - number of file reader processes (default: 64)
+ *   #   reader_sleep   - file reader sleep between passes in microseconds (default: 120000)
  */
 
 #define _GNU_SOURCE
@@ -51,7 +48,7 @@
 /* ── Tunables ─────────────────────────────────────────────────────── */
 
 /*
- * Default number of child processes that mmap the file, overridden by argv[3].
+ * Default number of child processes that mmap the file, overridden by argv[5].
  * Each child = a separate mm_struct in the lruvec mm_list.
  * More processes → aging has to walk more page tables → more expensive
  * aging → more likely to trigger should_run_aging() repeatedly.
@@ -59,12 +56,19 @@
 #define DEFAULT_NR_READERS	64
 
 /*
- * Number of pressure threads that fault anon pages concurrently.
+ * Default number of pressure threads that fault anon pages concurrently,
+ * overridden by argv[4].
  * Multiple direct reclaimers all hitting the age-then-break path
  * simultaneously is what exhausts reclaim budget and triggers OOM.
  * A single thread just stalls because kswapd can trickle progress.
  */
-#define NR_PRESSURE_THREADS	96
+#define DEFAULT_NR_PRESSURE_THREADS	96
+
+/*
+ * Default sleep time for file readers in microseconds, overridden by argv[6].
+ * Small sleep so readers don't completely dominate the CPU.
+ */
+#define DEFAULT_READER_SLEEP_US		120000  /* 120 ms */
 
 /*
  * Number of alloc/release rounds for the pressure loop.
@@ -92,9 +96,40 @@
 static volatile sig_atomic_t stop_readers = 0;
 static pid_t *reader_pids;
 static int nr_readers;
+static int nr_pressure_threads;
+static useconds_t reader_sleep_us;
 static const char *filepath;
 static size_t filesize;
-static int anon_gb;
+static size_t anon_size;
+static size_t file_size;
+
+/*
+ * Parse a size string with optional suffix: g/G (GiB), m/M (MiB), k/K (KiB).
+ * Returns the size in bytes, or 0 on parse error.
+ */
+static size_t parse_size(const char *str)
+{
+	char *end;
+	double val;
+
+	val = strtod(str, &end);
+	if (end == str || val < 0)
+		return 0;
+
+	switch (*end) {
+	case 'g': case 'G':
+		return (size_t)(val * 1024 * 1024 * 1024);
+	case 'm': case 'M':
+		return (size_t)(val * 1024 * 1024);
+	case 'k': case 'K':
+		return (size_t)(val * 1024);
+	case '\0':
+		/* No suffix: assume bytes */
+		return (size_t)val;
+	default:
+		return 0;
+	}
+}
 
 /* Per-thread info for the pressure workers */
 struct pressure_work {
@@ -170,7 +205,7 @@ static void file_reader_child(int id)
 		/*
 		 * Small sleep so we don't completely dominate the CPU.
 		 */
-		usleep(120000);  /* 120 ms */
+		usleep(reader_sleep_us);
 	}
 
 	munmap(map, filesize);
@@ -225,34 +260,51 @@ int main(int argc, char **argv)
 	struct timespec ts_start, ts_end;
 	double elapsed;
 
-	if (argc < 3 || argc > 4) {
+	if (argc < 4 || argc > 7) {
 		fprintf(stderr,
-			"Usage: %s <path-to-large-file> <anon_gb> [nr_readers]\n"
+			"Usage: %s <path-to-large-file> <anon_size> <file_size>"
+			" [anon_workers] [file_workers] [reader_sleep_us]\n"
 			"\n"
-			"  path-to-large-file  Path to a large file (size auto-detected)\n"
-			"  anon_gb             Anonymous pressure size in GB\n"
-			"  nr_readers          Number of file reader processes (default: %d)\n"
+			"  path-to-large-file  Path to a large file (auto-created if missing or too small)\n"
+			"  anon_size           Anonymous pressure size (e.g., 44g, 512m)\n"
+			"  file_size           File cache working set size (e.g., 8g, 4096m)\n"
+			"  anon_workers        Number of anon pressure threads (default: %d)\n"
+			"  file_workers        Number of file reader processes (default: %d)\n"
+			"  reader_sleep_us     File reader sleep in microseconds (default: %d)\n"
 			"\n"
-			"Create the file first:\n"
-			"  dd if=/dev/urandom of=/tmp/testfile bs=1M count=32768\n"
+			"The test file is auto-created/extended if it doesn't exist or is too small.\n"
 			"\n"
-			"Then run:\n"
-			"  sudo swapoff -a\n"
-			"  %s /tmp/testfile 108\n",
-			argv[0], DEFAULT_NR_READERS, argv[0]);
+			"Example:\n"
+			"  %s /tmp/testfile 44g 8g\n",
+			argv[0], DEFAULT_NR_PRESSURE_THREADS,
+			DEFAULT_NR_READERS, DEFAULT_READER_SLEEP_US, argv[0]);
 		return 1;
 	}
 
 	filepath = argv[1];
-	anon_gb = atoi(argv[2]);
-	nr_readers = (argc >= 4) ? atoi(argv[3]) : DEFAULT_NR_READERS;
 
-	if (anon_gb <= 0) {
-		fprintf(stderr, "Error: anon_gb must be positive\n");
+	anon_size = parse_size(argv[2]);
+	if (anon_size == 0) {
+		fprintf(stderr, "Error: invalid anon_size '%s'\n", argv[2]);
+		return 1;
+	}
+
+	file_size = parse_size(argv[3]);
+	if (file_size == 0) {
+		fprintf(stderr, "Error: invalid file_size '%s'\n", argv[3]);
+		return 1;
+	}
+
+	nr_pressure_threads = (argc >= 5) ? atoi(argv[4]) : DEFAULT_NR_PRESSURE_THREADS;
+	nr_readers = (argc >= 6) ? atoi(argv[5]) : DEFAULT_NR_READERS;
+	reader_sleep_us = (argc >= 7) ? (useconds_t)atoi(argv[6]) : DEFAULT_READER_SLEEP_US;
+
+	if (nr_pressure_threads <= 0) {
+		fprintf(stderr, "Error: anon_workers must be positive\n");
 		return 1;
 	}
 	if (nr_readers <= 0) {
-		fprintf(stderr, "Error: nr_readers must be positive\n");
+		fprintf(stderr, "Error: file_workers must be positive\n");
 		return 1;
 	}
 
@@ -262,25 +314,80 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	if (stat(filepath, &st) < 0) {
-		perror("stat");
-		return 1;
+	if (stat(filepath, &st) < 0 || (size_t)st.st_size < file_size) {
+		int need_create = (errno == ENOENT || stat(filepath, &st) < 0);
+
+		fprintf(stderr, "[setup] %s '%s' (%zu MB)...\n",
+			need_create ? "Creating test file" : "Extending test file",
+			filepath, file_size / (1024 * 1024));
+
+		{
+			int fd;
+			size_t remaining, current_size = 0;
+			char buf[1024 * 1024]; /* 1 MB write buffer */
+
+			fd = open(filepath, O_WRONLY | O_CREAT, 0644);
+			if (fd < 0) {
+				perror("open (create)");
+				free(reader_pids);
+				return 1;
+			}
+
+			if (!need_create) {
+				current_size = st.st_size;
+				if (lseek(fd, 0, SEEK_END) < 0) {
+					perror("lseek");
+					close(fd);
+					free(reader_pids);
+					return 1;
+				}
+			}
+
+			memset(buf, 0, sizeof(buf));
+			remaining = file_size - current_size;
+			while (remaining > 0) {
+				size_t chunk = remaining < sizeof(buf) ?
+					       remaining : sizeof(buf);
+				ssize_t written = write(fd, buf, chunk);
+
+				if (written < 0) {
+					perror("write");
+					close(fd);
+					free(reader_pids);
+					return 1;
+				}
+				remaining -= written;
+			}
+
+			if (fdatasync(fd) < 0)
+				perror("fdatasync");
+			close(fd);
+		}
+
+		if (stat(filepath, &st) < 0) {
+			perror("stat (after create)");
+			free(reader_pids);
+			return 1;
+		}
+		fprintf(stderr, "[setup] File ready: %zu MB\n",
+			(size_t)st.st_size / (1024 * 1024));
 	}
-	filesize = st.st_size;
+	filesize = file_size;
 
 	fprintf(stderr, "=== File / Anon pressure reproducer ===\n");
-	fprintf(stderr, "  File:         %s (%zu MB)\n",
+	fprintf(stderr, "  File:           %s (%zu MB mapped)\n",
 		filepath, filesize / (1024*1024));
-	fprintf(stderr, "  File readers: %d processes (separate mm_structs)\n",
+	fprintf(stderr, "  File workers:   %d processes (separate mm_structs)\n",
 		nr_readers);
-	fprintf(stderr, "  Anon pressure: %d GB (%d threads)\n",
-		anon_gb, NR_PRESSURE_THREADS);
+	fprintf(stderr, "  Reader sleep:   %u us\n", (unsigned)reader_sleep_us);
+	fprintf(stderr, "  Anon pressure:  %zu MB (%d threads)\n",
+		anon_size / (1024*1024), nr_pressure_threads);
 	fprintf(stderr, "  Read stride:  %lu KB\n", READ_STRIDE / 1024);
 	fprintf(stderr, "\n");
 
 	if (filesize < 1UL * 1024 * 1024 * 1024) {
-		fprintf(stderr, "WARNING: File is smaller than 1 GB. "
-			"For best results, use a ~32 GB file.\n");
+		fprintf(stderr, "WARNING: File working set is smaller than 1 GB. "
+			"For best results, use a larger file_size.\n");
 	}
 
 	/* Check MGLRU since this reproducer is meant to stress test MGLRU */
@@ -298,23 +405,6 @@ int main(int argc, char **argv)
 			fclose(f);
 		} else {
 			fprintf(stderr, "WARNING: Cannot read /sys/kernel/mm/lru_gen/enabled\n");
-		}
-	}
-
-	/* Check swap */
-	{
-		FILE *f = fopen("/proc/swaps", "r");
-		if (f) {
-			char buf[256];
-			int lines = 0;
-			while (fgets(buf, sizeof(buf), f))
-				lines++;
-			fclose(f);
-			if (lines > 1)
-				fprintf(stderr, "WARNING: Swap is active! "
-					"Run 'swapoff -a' first.\n");
-			else
-				fprintf(stderr, "  Swap:         disabled (good)\n");
 		}
 	}
 
@@ -364,20 +454,31 @@ int main(int argc, char **argv)
 
 	/* ── Phase 3: Start anon memory pressure ──────────────────── */
 	fprintf(stderr, "\n[phase3] Starting %d anonymous pressure threads "
-		"(%d GB x %d rounds)...\n",
-		NR_PRESSURE_THREADS, anon_gb, NR_PRESSURE_ROUNDS);
+		"(%zu MB x %d rounds)...\n",
+		nr_pressure_threads, anon_size / (1024*1024), NR_PRESSURE_ROUNDS);
 
 	clock_gettime(CLOCK_MONOTONIC, &ts_start);
 
 	{
-		size_t total = (size_t)anon_gb * 1024UL * 1024UL * 1024UL;
-		size_t per_thread = (total / NR_PRESSURE_THREADS) & ~4095UL;
+		size_t total = anon_size;
+		size_t per_thread = (total / nr_pressure_threads) & ~4095UL;
 		int round;
+		pthread_t *tids;
+		struct pressure_work *works;
+
+		tids = calloc(nr_pressure_threads, sizeof(pthread_t));
+		works = calloc(nr_pressure_threads, sizeof(struct pressure_work));
+		if (!tids || !works) {
+			perror("calloc");
+			kill_readers();
+			free(tids);
+			free(works);
+			free(reader_pids);
+			return 1;
+		}
 
 		for (round = 0; round < NR_PRESSURE_ROUNDS; round++) {
 			char *anon_base;
-			pthread_t tids[NR_PRESSURE_THREADS];
-			struct pressure_work works[NR_PRESSURE_THREADS];
 			int all_ok = 1;
 
 			anon_base = mmap(NULL, total, PROT_READ | PROT_WRITE,
@@ -390,12 +491,12 @@ int main(int argc, char **argv)
 				break;
 			}
 
-			fprintf(stderr, "[pressure] Round %d/%d: faulting %d GB "
+			fprintf(stderr, "[pressure] Round %d/%d: faulting %zu MB "
 				"across %d threads...\n",
 				round + 1, NR_PRESSURE_ROUNDS,
-				anon_gb, NR_PRESSURE_THREADS);
+				anon_size / (1024*1024), nr_pressure_threads);
 
-			for (i = 0; i < NR_PRESSURE_THREADS; i++) {
+			for (i = 0; i < nr_pressure_threads; i++) {
 				works[i].id = i;
 				works[i].base = anon_base;
 				works[i].offset = (size_t)i * per_thread;
@@ -407,7 +508,7 @@ int main(int argc, char **argv)
 				}
 			}
 
-			for (i = 0; i < NR_PRESSURE_THREADS; i++) {
+			for (i = 0; i < nr_pressure_threads; i++) {
 				if (works[i].success == -1)
 					continue;
 				pthread_join(tids[i], NULL);
@@ -431,10 +532,13 @@ int main(int argc, char **argv)
 		}
 
 		if (round == NR_PRESSURE_ROUNDS) {
-			fprintf(stderr, "[pressure] All %d rounds of %d GB "
+			fprintf(stderr, "[pressure] All %d rounds of %zu MB "
 				"completed! No OOM — reclaim worked.\n",
-				NR_PRESSURE_ROUNDS, anon_gb);
+				NR_PRESSURE_ROUNDS, anon_size / (1024*1024));
 		}
+
+		free(tids);
+		free(works);
 	}
 
 	clock_gettime(CLOCK_MONOTONIC, &ts_end);
