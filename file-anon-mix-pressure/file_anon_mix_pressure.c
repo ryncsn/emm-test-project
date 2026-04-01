@@ -396,7 +396,7 @@ int main(int argc, char **argv)
 	fprintf(stderr, "=== File / Anon pressure reproducer ===\n");
 	fprintf(stderr, "  File:           %s (%zu MB mapped)\n",
 		filepath, filesize / (1024*1024));
-	fprintf(stderr, "  File workers:   %d processes (separate mm_structs)\n",
+	fprintf(stderr, "  File workers:   %d processes\n",
 		nr_readers);
 	fprintf(stderr, "  Reader sleep:   %u us\n", (unsigned)reader_sleep_us);
 	fprintf(stderr, "  Anon pressure:  %zu MB (%d threads)\n",
@@ -416,7 +416,7 @@ int main(int argc, char **argv)
 			int val;
 			if (fscanf(f, "%i", &val) == 1) {
 				if (!(val & 1))
-					fprintf(stderr, "WARNING: MGLRU not enabled! "
+					fprintf(stderr, "MGLRU not enabled. Try:"
 						"echo 7 > /sys/kernel/mm/lru_gen/enabled\n");
 				else
 					fprintf(stderr, "  MGLRU:        enabled (0x%x)\n", val);
@@ -601,8 +601,6 @@ int main(int argc, char **argv)
 	kill_readers();
 
 	fprintf(stderr, "\n=== TEST COMPLETE ===\n");
-	fprintf(stderr, "If you got here without OOM kills, the fix is working.\n");
-	fprintf(stderr, "Check dmesg for OOM messages: dmesg | grep -i oom\n");
 
 	free(reader_pids);
 	return 0;
