@@ -1,4 +1,4 @@
-First, (review and edit) then run setup.sh, you may want to change SETUP_BASE, the database setup will comsume about ~200G of disk space.
+First, (review and edit) then run setup.sh, you may want to change SETUP_BASE, the database setup will consume about ~200G of disk space.
 
 For reference, I used Fedora Cloud Image as the base VM image.
 
@@ -17,8 +17,11 @@ mount /dev/vdb /var/mongo-test/
 
 Run the benchmark (run this in test environment, eg. the VM above)
 =================
-Clone this repo:
-git clone https://github.com/ryncsn/emm-test-project.git
+Clone this repo (with submodule):
+git clone --recurse-submodules https://github.com/ryncsn/emm-test-project.git
+
+If already cloned without submodules:
+git submodule update --init
 
 Run the setup script:
 cd emm-test-project/mongo-cluster
@@ -29,21 +32,18 @@ docker.io/library/mongo:6
 
 After setup.sh is done, run the command it instruct you to run (setup the DB user/password).
 
-Then, clone pytpcc/pytpcc:
-git clone https://github.com/ryncsn/py-tpcc
+setup.sh will also initialize the py-tpcc submodule, and build a Docker image
+(py-tpcc-runner) based on python:2.7 with pymongo installed, for running py-tpcc
+since Python 2.7 is no longer available through dnf on recent Fedora releases.
 
-Unfortunately this still requires Python 2.7, but fortunately until Fedora 39 python 2.7 is still available.
-dnf install python2.7 -y
-
-No luck for pip, install it manually:
-curl https://bootstrap.pypa.io/pip/2.7/get-pip.py -o get-pip.py
-python2 get-pip.py
-
-And install pymongo:
-pip2 install pymongo
-
-For data preparing: (only need to run once, will consume ~200G of space, you may use mongodb.config.* depends on which replica is master)
-./tpcc.py --config=mongodb.config mongodb --no-execute --duration=900 --warehouses=500 --clients=30
+For data preparing: (only need to run once, will consume ~200G of space, you may
+use mongodb.config.* depends on which replica is master)
+./run.sh load
 
 For benchmark: (run multiple time for benchmark)
-./tpcc.py --config=mongodb.config mongodb --no-load --duration=900 --warehouses=500 --clients=30
+./run.sh run
+
+For both load and benchmark in one go:
+./run.sh both
+
+run.sh will automatically start the mongo cluster if it's not already running.

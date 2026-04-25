@@ -2,6 +2,7 @@
 
 SETUP_BASE="/var/mongo-test"
 REPLICAS="r1 r2 r3"
+TPCC_IMAGE="py-tpcc-runner"
 TEMPLATE='
 {
     "net": {
@@ -70,10 +71,10 @@ for replica in $REPLICAS; do
 done
 
 for replica in $REPLICAS; do
-	docker stop "mongo-$replica" || :
-	docker rm "mongo-$replica" || :
+	docker stop "mongo-$replica" || echo "Stop existing docker failed, this is normal for initilization since there is no existing old ones"
+	docker rm "mongo-$replica" || echo "Removing existing docker failed, this is normal for initilization since there is no existing old ones"
 done
-docker network remove mongo-cluster || :
+docker network remove mongo-cluster || echo "Removing existing network setup failed, this is normal for initilization since there is no existing old ones"
 
 # XXX: If MongoDB Failed to setup, you may remove the --rm below to retrive failure log
 port=7000
@@ -106,6 +107,19 @@ set +x
 
 echo "=== Setting up user/password... if this failed, you can try manually later."
 set -x
-sleep 10
+sleep 30
 docker exec -it mongo-r1 mongosh admin --eval 'db.createUser({user:"root",pwd:"passwd",roles:["root"]})'
 set +x
+
+# Initialize py-tpcc submodule
+echo "=== Initializing py-tpcc submodule..."
+cd "$(dirname "$0")"
+git submodule update --init py-tpcc
+
+# Build Python 2.7 docker image for py-tpcc
+echo "=== Building Python 2.7 docker image ($TPCC_IMAGE) with pymongo..."
+docker rm -f py-tpcc-build 2>/dev/null || :
+docker run --name py-tpcc-build python:2.7 pip install pymongo
+docker commit py-tpcc-build "$TPCC_IMAGE"
+docker rm py-tpcc-build
+echo "=== Docker image '$TPCC_IMAGE' built successfully."

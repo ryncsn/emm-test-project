@@ -1,0 +1,3 @@
+[submodule "mongo-cluster/py-tpcc"]
+	path = mongo-cluster/py-tpcc
+	url = git@github.com:ryncsn/py-tpcc.git
