@@ -46,6 +46,22 @@ MONGO_INITDB_DATABASE=testdb
 
 set -e
 
+wait_for_mongosh() {
+	local container="$1"
+	local db="${2:-test}"
+	local max_attempts=30
+	echo "=== Waiting for mongosh on $container ($db) to be ready..."
+	for (( i=1; i<=max_attempts; i++ )); do
+		if docker exec "$container" mongosh "$db" --quiet --eval 'db.runCommand({ping:1})' &>/dev/null; then
+			echo "=== $container is ready (attempt $i)."
+			return 0
+		fi
+		sleep 2
+	done
+	echo "ERROR: $container did not become ready after $((max_attempts * 2))s."
+	return 1
+}
+
 echo "Install packages? (y/n)"
 read -r RES
 if [[ "$RES" == y ]]; then
@@ -70,11 +86,12 @@ for replica in $REPLICAS; do
 	echo "$TEMPLATE" > "$SETUP_BASE/mongo-$replica/config.conf"
 done
 
+echo "=== Cleaning up old containers and network..."
 for replica in $REPLICAS; do
-	docker stop "mongo-$replica" || echo "Stop existing docker failed, this is normal for initilization since there is no existing old ones"
-	docker rm "mongo-$replica" || echo "Removing existing docker failed, this is normal for initilization since there is no existing old ones"
+	docker stop "mongo-$replica" 2>/dev/null || true
+	docker rm "mongo-$replica" 2>/dev/null || true
 done
-docker network remove mongo-cluster || echo "Removing existing network setup failed, this is normal for initilization since there is no existing old ones"
+docker network remove mongo-cluster 2>/dev/null || true
 
 # XXX: If MongoDB Failed to setup, you may remove the --rm below to retrive failure log
 port=7000
@@ -90,26 +107,25 @@ for replica in $REPLICAS; do
 		mongo:6 -f /data/db/config.conf
 done
 
-echo "=== Sleep 10s and executing cluster setup... if this failed, you can try manually later."
-set -x
-sleep 10
-# XXX: Need to change the setup command if REPLICAS changes.
-docker exec -it mongo-r1 mongosh --eval \
-'"rs.initiate({
-    _id: "issa-tpcc_0",
-    members: [
-      {_id: 0, host: "mongo-r1"},
-      {_id: 1, host: "mongo-r2"},
-      {_id: 2, host: "mongo-r3"}
-    ]
-})"' || echo "Cluster setup failed, check the error log."
-set +x
+# Build rs.initiate members array from $REPLICAS
+members=""
+id=0
+for replica in $REPLICAS; do
+	[[ -n "$members" ]] && members+=","
+	members+="{_id:$id,host:\"mongo-$replica\"}"
+	id=$(( id + 1 ))
+done
 
-echo "=== Setting up user/password... if this failed, you can try manually later."
-set -x
-sleep 30
-docker exec -it mongo-r1 mongosh admin --eval 'db.createUser({user:"root",pwd:"passwd",roles:["root"]})'
-set +x
+echo "=== Initiating replica set..."
+wait_for_mongosh mongo-r1
+docker exec mongo-r1 mongosh --quiet --eval \
+	"rs.initiate({_id:\"issa-tpcc_0\",members:[$members]})" \
+	|| echo "Cluster setup failed, check the error log."
+
+echo "=== Setting up user/password..."
+wait_for_mongosh mongo-r1 admin
+docker exec mongo-r1 mongosh admin --quiet --eval \
+	'db.createUser({user:"root",pwd:"passwd",roles:["root"]})'
 
 # Initialize py-tpcc submodule
 echo "=== Initializing py-tpcc submodule..."
