@@ -49,7 +49,7 @@ echo "Install packages? (y/n)"
 read -r RES
 if [[ "$RES" == y ]]; then
 	# XXX: Or maybe you just want "dnf install docker" here.
-	dnf install podman-docker
+	dnf install docker
 fi
 
 echo "Running this script will destroy all previous data under $SETUP_BASE, and may destroy all containers named mongo-*, this is only for standalone test environment, continue? (y/n)"
