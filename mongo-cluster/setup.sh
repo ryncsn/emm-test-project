@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
+set -e
 
-SETUP_BASE="/var/mongo-test"
-REPLICAS="r1 r2 r3"
-TPCC_IMAGE="py-tpcc-runner"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/common.sh"
+
 TEMPLATE='
 {
     "net": {
@@ -40,28 +41,6 @@ TEMPLATE='
 }
 '
 
-MONGO_INITDB_ROOT_USERNAME=root
-MONGO_INITDB_ROOT_PASSWORD=passwd
-MONGO_INITDB_DATABASE=testdb
-
-set -e
-
-wait_for_mongosh() {
-	local container="$1"
-	local db="${2:-test}"
-	local max_attempts=30
-	echo "=== Waiting for mongosh on $container ($db) to be ready..."
-	for (( i=1; i<=max_attempts; i++ )); do
-		if docker exec "$container" mongosh "$db" --quiet --eval 'db.runCommand({ping:1})' &>/dev/null; then
-			echo "=== $container is ready (attempt $i)."
-			return 0
-		fi
-		sleep 2
-	done
-	echo "ERROR: $container did not become ready after $((max_attempts * 2))s."
-	return 1
-}
-
 echo "Install packages? (y/n)"
 read -r RES
 if [[ "$RES" == y ]]; then
@@ -93,26 +72,21 @@ for replica in $REPLICAS; do
 done
 docker network remove mongo-cluster 2>/dev/null || true
 
-# XXX: If MongoDB Failed to setup, you may remove the --rm below to retrive failure log
-port=7000
-docker network create mongo-cluster
-for replica in $REPLICAS; do
-	port=$(( port + 1 ))
-	docker run -d --network mongo-cluster --name "mongo-$replica" \
-		-e MONGO_INITDB_ROOT_USERNAME=$MONGO_INITDB_ROOT_USERNAME \
-		-e MONGO_INITDB_ROOT_PASSWORD=$MONGO_INITDB_ROOT_PASSWORD \
-		-e MONGO_INITDB_DATABASE=$MONGO_INITDB_DATABASE \
-		-v "$SETUP_BASE/mongo-$replica:/data/db" \
-		-p $port:27017 \
-		mongo:6 -f /data/db/config.conf
-done
+# Bring up the cluster (creates slice, network, and containers)
+ensure_cluster
 
 # Build rs.initiate members array from $REPLICAS
+# Give r1 the highest priority so it is always elected primary.
+# The benchmark connects directly to r1 (port 7001) and needs it to be primary.
 members=""
 id=0
 for replica in $REPLICAS; do
 	[[ -n "$members" ]] && members+=","
-	members+="{_id:$id,host:\"mongo-$replica\"}"
+	if [[ "$replica" == "r1" ]]; then
+		members+="{_id:$id,host:\"mongo-$replica\",priority:10}"
+	else
+		members+="{_id:$id,host:\"mongo-$replica\",priority:1}"
+	fi
 	id=$(( id + 1 ))
 done
 
@@ -129,7 +103,7 @@ docker exec mongo-r1 mongosh admin --quiet --eval \
 
 # Initialize py-tpcc submodule
 echo "=== Initializing py-tpcc submodule..."
-cd "$(dirname "$0")"
+cd "$SCRIPT_DIR"
 git submodule update --init py-tpcc
 
 # Build Python 2.7 docker image for py-tpcc

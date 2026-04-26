@@ -47,3 +47,11 @@ For both load and benchmark in one go:
 ./run.sh both
 
 run.sh will automatically start the mongo cluster if it's not already running.
+
+Resource limits and tuning:
+./run.sh --memlimit 48G --iops 5000 run        # default limits
+./run.sh --memlimit 32G --iops 10000 run        # custom limits
+./run.sh --memlimit 0 --iops 0 run              # no limits
+./run.sh -w 100 -c 10 -d 300 run                # fewer warehouses, shorter run
+./run.sh --config mongodb.config.1 run           # use a different replica
+./run.sh --help                                  # full usage
